@@ -271,6 +271,14 @@ RUN mkdir build && cd build \
     && cmake .. -DCMAKE_BUILD_TYPE=Release \
     && make
 
+# Build airsim_gst_bridge (AirSim camera shim; unlike gz_gst_bridge it links
+# rclcpp/sensor_msgs, so ROS must be sourced for cmake to find them)
+WORKDIR /aas/simulation_resources/comms/airsim_gst_bridge
+RUN bash -c "source /opt/ros/humble/setup.bash \
+    && mkdir build && cd build \
+    && cmake .. -DCMAKE_BUILD_TYPE=Release \
+    && make"
+
 # Create sensor and aircraft SDFs based on sensor_config.yaml parameters
 WORKDIR /aas/simulation_resources/aircraft_models/
 RUN ruby _create_sdfs_using_sensor_config.rb
@@ -283,5 +291,8 @@ RUN echo "source /aas/simulation_ws/install/setup.bash" >> /root/.bashrc
 # Final config
 WORKDIR /aas
 COPY simulation/simulation.yml.erb /aas/simulation.yml.erb
+COPY simulation/simulation_airsim.yml.erb /aas/simulation_airsim.yml.erb
 COPY simulation/simulation_resources/patches/tmux.conf /root/.tmux.conf
-ENTRYPOINT ["tmuxinator", "start", "-p", "/aas/simulation.yml.erb"]
+# Select the tmuxinator launcher by $SIM (default 'gazebo' keeps the original path
+# unchanged; 'airsim' uses the AirSim backend launcher).
+ENTRYPOINT ["/bin/bash", "-c", "if [ \"$SIM\" = \"airsim\" ]; then exec tmuxinator start -p /aas/simulation_airsim.yml.erb; else exec tmuxinator start -p /aas/simulation.yml.erb; fi"]

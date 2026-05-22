@@ -25,16 +25,41 @@ Contents:
 
 ---
 
+## Quick start (one command, after rebuilding the sim image)
+
+The orchestration is wired into `tools_and_docs/`. After `sim_build.sh` (so the image has the
+camera shim + AirSim launcher), start AirSim first, then:
+
+```bash
+SIM=airsim AUTOPILOT=px4 ./tools_and_docs/sim_run.sh        # or AUTOPILOT=ardupilot
+```
+
+`sim_run.sh` selects `simulation_airsim.yml.erb`, adds a host route to AirSim
+(`--add-host=host.docker.internal:host-gateway`), and launches one TEVV bridge container per
+drone. Overrides: `AIRSIM_HOST=<ip>` if AirSim isn't at `host.docker.internal` (e.g. on another
+machine — use its LAN IP); `BRIDGE_IMAGE=<tag>` for the bridge image.
+
+The phases below are the **manual / de-risk** path — run them first to validate each piece
+(especially the PX4 `none` target and the bridge ↔ external-FC interaction) before relying on
+the one-command flow.
+
+> **Platform:** the tested target is **native Linux + NVIDIA GPU**. On native docker, the
+> `--add-host` route is what makes the external AirSim reachable from the sim bridge network.
+
+---
+
 ## Phase 0 — SITL ↔ AirSim link (do this first)
 
 ### 1. Install the AirSim settings
-Copy the matching template to AirSim's settings location on the **Windows** host
-(usually `%USERPROFILE%\Documents\AirSim\settings.json`):
+Copy the matching template to AirSim's settings location (Linux: `~/Documents/AirSim/settings.json`;
+Windows: `%USERPROFILE%\Documents\AirSim\settings.json`):
 - PX4 → `settings.px4.json`
 - ArduPilot → `settings.ardupilot.json`
 
 Both expose the RPC API on `41451` bound to `0.0.0.0` so the bridge container can reach it.
-Open `41451/tcp`, `4560/tcp` (PX4 HIL), `9002-9003/udp` (ArduPilot) on the Windows firewall.
+If a host firewall is active, allow `41451/tcp`, `4560/tcp` (PX4 HIL), `9002-9003/udp`
+(ArduPilot) — on native Linux `ufw` is usually inactive and nothing is needed; on Windows open
+them in the Windows firewall.
 
 ### 2a. PX4 SITL → AirSim
 PX4 SITL must run with the **`none`** simulator target (no Gazebo) so AirSim provides physics
