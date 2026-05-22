@@ -148,5 +148,29 @@ cmake -B build -S . && cmake --build build         # ROS 2 + gstreamer dev must 
 - **NumPy on Humble:** if `cv_bridge`/yolo hits `numpy.dtype size changed`, `pip install 'numpy<2.0'`.
 - **AAS worlds/wind/gimbal** are Gazebo-specific — use AirSim's Unreal environments instead.
 
+---
+
+## Definition of done
+
+"Everything works" when, after `SIM=airsim AUTOPILOT=px4 ./tools_and_docs/sim_run.sh`:
+
+- The **drone flies its mission in the AirSim 3D window** under AAS's own mission/offboard control
+  (arms, takes off, navigates) — and reacts to perception if a target is in view.
+- **QGC** shows the vehicle connected and **"Ready to Fly"**.
+- The ROS 2 graph (in the drone's `ROS_DOMAIN_ID`) has: `/Drone1/fmu/out/*` live (PX4) or
+  `/mavros/state: connected: true` (ArduPilot); bridge sensors `/Drone1/{odom,imu,lidar,camera*/image}`
+  and an advancing `/clock`; `/lidar_points` feeding KISS-ICP; `/detections` populated when a target is in view.
+- `docker ps` shows `airsim-bridge-container-inst*` up.
+- The **aircraft container is unchanged** from the Gazebo / real-Jetson build.
+
+Confirm it mechanically with the bundled smoke-test (run with ROS sourced, after launch):
+```bash
+DRONE_ID=1 AUTOPILOT=px4 ./verify.sh    # prints OK/FAIL per signal; exits non-zero on any failure
+```
+
+If a check fails, the gate names the culprit: no `fmu/out/*` → PX4 didn't reach AirSim (the
+`none`-target unknown); bridge container exits → can't reach AirSim RPC; drone twitches/fights →
+the `enableApiControl` conflict above.
+
 See the full design rationale in the approved plan
 (`~/.claude/plans/how-easy-is-it-mighty-goblet.md`).
