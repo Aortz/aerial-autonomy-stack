@@ -1,0 +1,136 @@
+<%
+  # =============================================================================
+  # simulation_airsim.yml.erb  --  AirSim backend for AAS (real-time)
+  # -----------------------------------------------------------------------------
+  # Sibling of simulation.yml.erb. AirSim (Cosys-AirSim) runs EXTERNALLY (on the
+  # Windows host, Unreal) and is the physics+sensor engine driving PX4/ArduPilot
+  # SITL. The TEVV-Airsim-ROS2-Bridge runs in its OWN container (Model A) and
+  # surfaces AirSim camera/LiDAR into ROS2 -- it is NOT launched here.
+  #
+  # This launcher therefore brings up, per drone: the AirSim-targeted SITL, the
+  # camera shim (bridge Image -> H.264/RTP udp:5600 for yolo_py), and a LiDAR
+  # relay (bridge PointCloud2 -> /lidar_points). No `gz sim`, no ros_gz_bridge,
+  # no /clock pane (the TEVV bridge owns /clock).
+  #
+  # Gymnasium stepping is intentionally unsupported here (real-time only).
+  # See simulation_resources/airsim/README.md for the full runbook + caveats.
+  # =============================================================================
+  autopilot = ENV.fetch('AUTOPILOT', 'px4')
+  headless = ENV.fetch('HEADLESS', 'false') == 'true'
+  camera = ENV.fetch('CAMERA', 'true') == 'true'
+  lidar = ENV.fetch('LIDAR', 'true') == 'true'
+
+  sim_subnet = ENV.fetch('SIM_SUBNET', '10.42')
+  ground_id = ENV.fetch('GROUND_ID', '101')
+
+  num_quads = ENV.fetch('NUM_QUADS', 1).to_i
+  num_vtols = ENV.fetch('NUM_VTOLS', 0).to_i
+
+  gnd_container = ENV.fetch('GND_CONTAINER', 'true') == 'true'
+
+  # IP of the Windows host running AirSim (Unreal + RPC :41451 + PX4 HIL :4560).
+  # From WSL2/Docker Desktop, host.docker.internal usually resolves to it.
+  airsim_host = ENV.fetch('AIRSIM_HOST', 'host.docker.internal')
+
+  # Camera frame rate must match the AirSim camera + sensor_config.yaml.
+  require 'yaml'
+  sensor_config = YAML.load_file('/aas/simulation_resources/aircraft_models/sensor_config.yaml')
+  cam_update_rate = sensor_config['sensors']['camera_intrinsics']['update_rate']
+
+  drones = []
+  num_quads.times { |i| drones << { type: 'quad', index: i } }
+  num_vtols.times { |i| drones << { type: 'vtol', index: i } }
+%>
+
+name: sim
+
+windows:
+
+  - airsim_info:
+      layout: tiled
+      panes:
+        - clear && echo "AirSim backend. AirSim (Unreal) + the TEVV-Airsim-ROS2-Bridge run separately; this container runs SITL + the sensor shims. AIRSIM_HOST=<%= airsim_host %>"
+
+  <% drones.each_with_index do |drone, sitl_instance| %>
+  <%
+    drone_id = sitl_instance + 1
+    is_quad = drone[:type] == 'quad'
+    if autopilot == 'px4'
+      autostart = is_quad ? 5140 : 5141
+      # Env var parameter injection (PX4_PARAM_* prefix). XRCE-DDS plumbing is
+      # IDENTICAL to the Gazebo launcher -- only the simulator backend changes.
+      signed_32bit_ip = "#{sim_subnet}.90.#{drone_id}".split('.').map(&:to_i).pack('C*').unpack1('l>')
+    elsif autopilot == 'ardupilot'
+      vehicle_config = is_quad ? '-v ArduCopter -f airsim-copter' : '-v ArduPlane -f airsim-quadplane'
+      model_name = is_quad ? "iris_with_ardupilot_#{drone_id}" : "alti_transition_quad_#{drone_id}"
+      # AirSim<->ArduPilot UDP ports are per-instance to avoid collisions.
+      sim_port_in = 9003 + sitl_instance * 10
+      sim_port_out = 9002 + sitl_instance * 10
+    end
+  %>
+  <% if autopilot == 'px4' %>
+  - px4_sitl_<%= drone_id %>:
+      layout: main-horizontal
+      panes:
+        # NOTE (Phase-0 spike): PX4 must use the 'none' simulator target (no Gazebo)
+        # so AirSim provides physics over MAVLink HIL (TCP 4560). Reconcile the exact
+        # invocation with AAS's prebuilt px4 binary for 1.16.2; the XRCE-DDS env below
+        # is unchanged from simulation.yml.erb so aircraft/ sees /Drone<id>/fmu/*.
+        - >
+          sleep <%= sitl_instance * 1.5 %> &&
+          PX4_SYS_AUTOSTART=<%= autostart %> ROS_DOMAIN_ID=<%= drone_id %> <%= gnd_container ? "AAS_GROUND_IP=#{sim_subnet}.90.#{ground_id}" : "" %>
+          PX4_UXRCE_DDS_NS="Drone<%= drone_id %>" PX4_PARAM_UXRCE_DDS_AG_IP=<%= signed_32bit_ip %> PX4_UXRCE_DDS_PORT=8888
+          PX4_SIMULATOR=none PX4_SIM_HOSTNAME=<%= airsim_host %>
+          /aas/github_apps/PX4-Autopilot/build/px4_sitl_default/bin/px4 -i <%= sitl_instance %>
+  <% elsif autopilot == 'ardupilot' %>
+  - ardu_sitl_<%= drone_id %>:
+      layout: main-horizontal
+      panes:
+        - >
+          sleep <%= sitl_instance * 3.0 %> && mkdir -p /aas/ardu_sitl_<%= drone_id %> && cd /aas/ardu_sitl_<%= drone_id %> &&
+          /aas/github_apps/ardupilot/Tools/autotest/sim_vehicle.py
+          <%= vehicle_config %>
+          -I <%= sitl_instance %> --sysid <%= drone_id %>
+          -A "--sim-address=<%= airsim_host %> --sim-port-in=<%= sim_port_in %> --sim-port-out=<%= sim_port_out %>"
+          --add-param-file=/aas/simulation_resources/aircraft_models/<%= model_name %>/ardupilot-4.6.params
+          <% if gnd_container %>
+          --out=udp:<%= "#{sim_subnet}.90.#{drone_id}" %>:8888
+          --out=udp:<%= "#{sim_subnet}.90.#{ground_id}" %>:<%= 16540 + sitl_instance %>
+          <% else %>
+          --out=udp:<%= "#{sim_subnet}.90.#{drone_id}" %>:8888
+          --out=udp:127.0.0.1:<%= 14550 + sitl_instance %>
+          <% end %>
+  <% end %>
+        <% if camera %>
+        # Camera shim: TEVV bridge Image -> H.264/RTP -> udp:<drone>:5600 (yolo_py unchanged).
+        # Confirm the bridge's image topic name with `ros2 topic list`.
+        - >
+          ROS_DOMAIN_ID=<%= drone_id %>
+          /aas/simulation_resources/comms/airsim_gst_bridge/build/airsim_gst_bridge
+          /Drone<%= drone_id %>/front_center/image
+          <%= "#{sim_subnet}.90.#{drone_id}" %> 5600 <%= cam_update_rate %>
+        <% end %>
+        <% if lidar %>
+        # LiDAR relay: TEVV bridge PointCloud2 -> /lidar_points (KISS-ICP input).
+        - >
+          ROS_DOMAIN_ID=<%= drone_id %> ros2 run topic_tools relay
+          /Drone<%= drone_id %>/lidar/points /lidar_points
+        <% end %>
+        # No /clock pane: the TEVV bridge self-publishes /clock from AirSim time.
+  <% end %>
+
+  <% unless gnd_container %>
+  - zenoh_and_qgc:
+      layout: even-horizontal
+      pre: if [ -n "$HOST_INPUT_GID" ]; then groupadd -g "$HOST_INPUT_GID" host_input 2>/dev/null || true; usermod -aG host_input qgcuser; fi
+      panes:
+        - zenoh-bridge-ros2dds
+        <% if headless %>
+        - echo "Headless mode, not launching QGroundControl."
+        <% else %>
+        - >
+          sed -i 's/^virtualJoystick=.*/virtualJoystick=<%= (num_quads + num_vtols) == 1 %>/g' /home/qgcuser/.config/QGroundControl/QGroundControl.ini &&
+          sed -i 's/^virtualJoystickAutoCenterThrottle=.*/virtualJoystickAutoCenterThrottle=<%= num_quads == 1 %>/g' /home/qgcuser/.config/QGroundControl/QGroundControl.ini &&
+          gosu qgcuser /squashfs-root/AppRun
+        <% end %>
+  <% end %>
