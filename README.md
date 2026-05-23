@@ -82,6 +82,7 @@ done
 
 ```
 - AUTOPILOT=px4, ardupilot
+- SIM=gazebo (default), airsim (experimental, see below)
 - HEADLESS/CAMERA/LIDAR=true, false
 - NUM_QUADS/NUM_VTOLS=0, 1, ...
 - WORLD=impalpable_greyness, apple_orchard, shibuya_crossing, swiss_town, waterworld
@@ -179,6 +180,18 @@ done
 > 
 > To end the simulation, in each terminal detach Tmux with `Ctrl + b`, then `d`; kill all lingering processes with `tmux kill-server && pkill -f gz`
 > </details>
+
+> [!NOTE]
+> **Run with AirSim instead of Gazebo (experimental).** AAS can use [Cosys-AirSim](https://github.com/DinoHub/TEVV-Airsim) as the simulator backend: AirSim drives PX4/ArduPilot SITL while the [`TEVV-Airsim-ROS2-Bridge`](https://github.com/DinoHub/TEVV-Airsim-ROS2-Bridge) surfaces AirSim's camera/LiDAR into ROS2. The aircraft autonomy stack is unchanged; real-time only (no Gymnasium stepping).
+>
+> Prereqs: an NVIDIA GPU; AirSim running with one of the provided settings ([`simulation/simulation_resources/airsim/settings.px4.json`](simulation/simulation_resources/airsim/settings.px4.json) or [`settings.ardupilot.json`](simulation/simulation_resources/airsim/settings.ardupilot.json)); the bridge image built (`tevv-airsim-ros2-bridge:humble`). Then:
+>
+> ```sh
+> cd aerial-autonomy-stack/tools_and_docs/
+> SIM=airsim AUTOPILOT=px4 NUM_QUADS=1 ./sim_run.sh                                           # set AIRSIM_HOST=<ip> if AirSim is not reachable at host.docker.internal
+> ```
+>
+> Full runbook (SITL↔AirSim, networking, caveats) and a `verify.sh` smoke-test: [`simulation/simulation_resources/airsim/README.md`](simulation/simulation_resources/airsim/README.md).
 
 ## 3. Jetson Deployment
 
