@@ -136,15 +136,26 @@ docker exec -d aircraft-container-inst0_1 bash -c \
 
 ---
 
-## 5. Known gaps / next
+## 5. Status of conops & perception
 
-- **Orbit conops step**: `yalla.yaml` step 2 (orbit) loops `Request mission upload failed`.
-  `/mavros/mission/push` exists (waypoint plugin allowlisted) but ArduPilot rejects the
-  upload — likely QGC acting as a 2nd GCS on the mission protocol, or mission content/timeout.
-  takeoff + wait work; full conops (orbit/land) does not yet.
-- **Perception (Phase 2)**: the aircraft already sees the bridge's `/Copter1/*` topics over
-  DDS. LiDAR = relay `/Copter1/LidarSensor1/points` → `/lidar_points` for `kiss_icp`. Camera
-  is not published yet — add a camera to the AirSim settings, then
-  `airsim_gst_bridge /Copter1/<cam>/image 127.0.0.1 5600 <fps>` → `yolo_node`.
+- **Orbit conops step — FIXED** (commit `685f382`). Root cause: ArduCopter rejects
+  `MAV_CMD_DO_SET_ROI_LOCATION (195)` during mission upload (`WaypointPush` →
+  `success=false, wp_transfered=2`); `MAV_CMD_DO_SET_ROI (201)` is accepted. The full
+  `yalla.yaml` (takeoff → wait → orbit@AUTO → wait → land/RTL) now runs end to end.
+  (Not QGC interference and not the SPLINE command — verified by isolation.)
+- **LiDAR — DONE** (commit `851dfa3`). On `SIM=airsim`, `kiss_icp` consumes the bridge's
+  `/Copter<id>/LidarSensor1/points` directly (DDS-visible on the aircraft domain);
+  `/kiss/odometry` publishes at 50 Hz. Run with `LIDAR=true`.
+- **Camera — pending the AirSim settings.** No `/Copter*/.../image` topic is published
+  because the user's `settings-ardupilot.json` has **no camera**. To enable: add a camera
+  block to that settings file (e.g. AAS `settings.ardupilot.json`'s `front_center`,
+  320×240, FOV < 90 to keep a pinhole model) and restart AirSim; the bridge will then
+  publish `/Copter<id>/<cam>/image`. Then feed `yolo_node` — preferred for the aircraft-only
+  external container: have `yolo_node` subscribe that ROS image topic directly (avoids the
+  GStreamer/udp:5600 hop and the `airsim_gst_bridge`, which lives in `simulation-image`,
+  not `aircraft-image`). Keep `--dfov` consistent with the AirSim camera FOV.
+
+## 6. Deferred
+
 - **PX4 + AirSim HIL**: needs a non-gz `none`/HIL airframe so PX4 connects to AirSim on
   `4560` instead of spawning Gazebo.
