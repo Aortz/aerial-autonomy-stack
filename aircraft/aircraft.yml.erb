@@ -67,7 +67,9 @@ windows:
         - ros2 run yolo_py yolo_py <%= headless ? '--headless' : '' %> <%= hitl ? '--hitl' : '' %> <%= remote_video_streams ? '--remote-video-streams' : '' %> <%= simulated_time ? '--ros-args -p use_sim_time:=true' : '' %> --dfov <%= simulated_time ? dfov_deg : 200.0 %>
         <% end %>
         <% if lidar %>
-        - ros2 launch kiss_icp odometry.launch.py topic:=/lidar_points <%= headless ? 'visualize:=false' : '' %>
+        # AirSim: consume the airsim-ros2-bridge LiDAR directly (Copter<id>/LidarSensor1/points,
+        # visible over DDS on the aircraft's domain); Gazebo path keeps /lidar_points.
+        - ros2 launch kiss_icp odometry.launch.py topic:=<%= sim == 'airsim' ? "/Copter#{drone_id}/LidarSensor1/points" : "/lidar_points" %> <%= headless ? 'visualize:=false' : '' %>
         <% end %>
 
   <% if autopilot == 'px4' %>
