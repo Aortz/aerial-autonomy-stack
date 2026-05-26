@@ -46,6 +46,30 @@ the one-command flow.
 > **Platform:** the tested target is **native Linux + NVIDIA GPU**. On native docker, the
 > `--add-host` route is what makes the external AirSim reachable from the sim bridge network.
 
+### External mode — fly AAS against a separately-run AirSim + SITL
+
+`SIM=airsim AIRSIM_EXTERNAL=true` flips the orchestration: AAS no longer owns the sim. The
+AirSim sim, the autopilot SITL, and the sensor bridges all run **outside** AAS (e.g. a
+host-networked `ardupilot-xfs`/`ardupilot-slim` compose you start yourself). `sim_run.sh` then
+launches **only** the AAS `aircraft` container(s) on `--net=host` — no `simulation`, `ground`,
+or bridge containers, and no docker networks.
+
+```bash
+SIM=airsim AIRSIM_EXTERNAL=true AUTOPILOT=ardupilot NUM_QUADS=1 ./tools_and_docs/sim_run.sh
+```
+
+Because the aircraft container is on the host network, MAVROS connects to the external SITL's
+MAVLink endpoint over `localhost`:
+
+- `FCU_URL` (default `tcp://127.0.0.1:5760`) — the MAVROS `fcu_url`. `ardupilot-slim` serves
+  MAVLink on TCP `5760`; for multiple drones the port **auto-offsets `+10` per drone**
+  (`5760`, `5770`, ...) unless you pass an explicit `FCU_URL` (single-drone tuning only).
+- The aircraft container runs with `SIMULATED_TIME=false` and `GND_CONTAINER=false`; there is
+  no AAS ground station in this mode.
+
+Stop with any keypress in the launching terminal (the script tears down only the aircraft
+container(s) it started).
+
 ---
 
 ## Phase 0 — SITL ↔ AirSim link (do this first)
