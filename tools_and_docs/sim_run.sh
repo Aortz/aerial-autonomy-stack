@@ -28,6 +28,8 @@ INSTANCE="${INSTANCE:-0}" # Integer ID to make docker network/container names un
 SIM="${SIM:-gazebo}" # Simulator backend: gazebo (default), airsim
 AIRSIM_HOST="${AIRSIM_HOST:-host.docker.internal}" # IP/host of the (external) AirSim RPC+HIL server, for SIM=airsim
 BRIDGE_IMAGE="${BRIDGE_IMAGE:-tevv-airsim-ros2-bridge:humble}" # TEVV-Airsim-ROS2-Bridge image, for SIM=airsim
+AIRSIM_EXTERNAL="${AIRSIM_EXTERNAL:-false}" # SIM=airsim: connect AAS aircraft to an EXTERNAL host-net AirSim+SITL (e.g. the ardupilot-xfs compose); launches ONLY the aircraft container(s) on --net=host (no AAS sim/ground/bridge/networks)
+FCU_URL="${FCU_URL:-tcp://127.0.0.1:5760}" # MAVROS fcu_url for AIRSIM_EXTERNAL (ardupilot-slim serves MAVLink on TCP 5760; default port auto-offsets +10 per drone unless overridden)
 # Set unique subnets and container/network names based on INSTANCE
 SIM_BYTE_1=$(echo "$SIM_SUBNET" | cut -d'.' -f1)
 SIM_BYTE_2=$(echo "$SIM_SUBNET" | cut -d'.' -f2)
@@ -116,6 +118,63 @@ XTERM_CONFIG_ARGS=(
     Ctrl Shift <Key>C: copy-selection(CLIPBOARD) \n\
     Ctrl Shift <Key>V: insert-selection(CLIPBOARD)'
 )
+
+# ---------------------------------------------------------------------------
+# AirSim EXTERNAL mode: the AirSim sim + ArduPilot SITL + sensor bridges run
+# OUTSIDE AAS (e.g. the host-networked ardupilot-xfs compose). Launch ONLY the
+# AAS aircraft container(s) on --net=host so MAVROS reaches the SITL's MAVLink on
+# localhost. No AAS sim/ground/bridge containers, no docker networks.
+# ---------------------------------------------------------------------------
+if [[ "$SIM" == "airsim" && "$AIRSIM_EXTERNAL" == "true" ]]; then
+  echo "AirSim EXTERNAL mode: launching only AAS aircraft container(s) on --net=host (sim provided by your compose)."
+  ext_cleanup() {
+    echo "Stopping AAS aircraft container(s)..."
+    for CID in $(docker ps -a -q --filter name="aircraft-container-inst${INSTANCE}" 2>/dev/null); do
+      docker stop -t 1 "$CID" >/dev/null 2>&1 || true
+      docker rm "$CID" >/dev/null 2>&1 || true
+    done
+    if command -v xhost >/dev/null 2>&1; then xhost -local:docker >/dev/null 2>&1 || true; fi
+    echo "All-clear"
+  }
+  trap ext_cleanup EXIT INT TERM
+  EXT_DRONE_ID=1
+  launch_ext_aircraft() {
+    local drone_type=$1
+    local num_drones=$2
+    for i in $(seq 1 "$num_drones"); do
+      sleep 1.0 # Limit resource usage
+      local NAME_AIRCRAFT_CNT="aircraft-container-inst${INSTANCE}_${EXT_DRONE_ID}"
+      # Per-drone MAVLink: ardupilot-slim serves TCP 5760 + 10*(id-1).
+      # Honor an explicit FCU_URL override (single-drone tuning); else auto-offset.
+      local fcu="$FCU_URL"
+      if [ "$FCU_URL" = "tcp://127.0.0.1:5760" ]; then fcu="tcp://127.0.0.1:$((5760 + (EXT_DRONE_ID - 1) * 10))"; fi
+      local DOCKER_CMD="docker run -it --rm \
+        --volume /tmp/.X11-unix:/tmp/.X11-unix:rw --device /dev/dri --gpus all \
+        --env DISPLAY=$DISPLAY --env QT_X11_NO_MITSHM=1 --env NVIDIA_DRIVER_CAPABILITIES=all --env XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR --env GST_DEBUG=3 \
+        --env __NV_PRIME_RENDER_OFFLOAD=1 --env __GLX_VENDOR_LIBRARY_NAME=nvidia \
+        --env AUTOPILOT=$AUTOPILOT --env HEADLESS=$HEADLESS --env CAMERA=$CAMERA --env LIDAR=$LIDAR \
+        --env DRONE_TYPE=$drone_type --env DRONE_ID=$EXT_DRONE_ID \
+        --env SIM=airsim --env SIMULATED_TIME=false --env FCU_URL=$fcu \
+        --env GND_CONTAINER=false \
+        --env ROS_DOMAIN_ID=$EXT_DRONE_ID \
+        --net=host \
+        --privileged \
+        --name $NAME_AIRCRAFT_CNT"
+      if [[ "$DESK_ENV" == "wsl" ]]; then DOCKER_CMD="$DOCKER_CMD $WSL_OPTS"; fi
+      DOCKER_CMD="$DOCKER_CMD ${DEV_AIR_OPTS} aircraft-image"
+      calculate_terminal_position "$EXT_DRONE_ID"
+      xterm "${XTERM_CONFIG_ARGS[@]}" -title "${drone_type^^} $EXT_DRONE_ID (AirSim ext, fcu=$fcu)" -fa Monospace -fs $FONT_SIZE -bg black -fg white \
+        -geometry "${TERM_COLS}x${TERM_ROWS}+${X_POS}+${Y_POS}" -hold -e bash -c "$DOCKER_CMD" &
+      EXT_DRONE_ID=$((EXT_DRONE_ID + 1))
+    done
+  }
+  launch_ext_aircraft "quad" "$NUM_QUADS"
+  launch_ext_aircraft "vtol" "$NUM_VTOLS"
+  echo "Aircraft container(s) up on --net=host -> MAVROS connects to the external SITL ($FCU_URL)."
+  echo "Press any key to stop the aircraft container(s)..."
+  read -n 1 -s
+  exit 0
+fi
 
 # Launch the simulation container
 DOCKER_CMD="docker run -it --rm \

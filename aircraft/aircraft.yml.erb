@@ -15,6 +15,12 @@
   hitl = ENV.fetch('HITL', 'false') == 'true'
   gnd_container = ENV.fetch('GND_CONTAINER', 'true') == 'true'
 
+  # AirSim backend (external host-net sim): MAVROS connects to the ArduPilot SITL's
+  # MAVLink stream. FCU_URL is overridable at runtime so the endpoint can be tuned
+  # without an image rebuild (ardupilot-slim secondary stream defaults to udp:14551).
+  sim = ENV.fetch('SIM', 'gazebo')
+  fcu_url = ENV.fetch('FCU_URL', 'tcp://127.0.0.1:5760')
+
   record_rosbag = ENV.fetch('RECORD_ROSBAG', 'false') == 'true'
 
   simulated_time = ENV.fetch('SIMULATED_TIME', 'false') == 'true'
@@ -74,8 +80,14 @@ windows:
       layout: even-horizontal
       panes:
         - >
-          <% if simulated_time %>
-          sudo sed -i '0,/ros__parameters:/s/ros__parameters:/ros__parameters:\n    use_sim_time: true/' /opt/ros/humble/share/mavros/launch/apm_config.yaml && 
+          <% if sim == 'airsim' %>
+          ros2 launch mavros apm.launch fcu_url:=<%= fcu_url %> tgt_system:=<%= drone_id %> &
+          MAVROS_PID=$! &&
+          until ros2 service type /mavros/set_stream_rate >/dev/null 2>&1; do sleep 1; done &&
+          ros2 service call /mavros/set_stream_rate mavros_msgs/srv/StreamRate "{stream_id: 0, message_rate: 10, on_off: true}" ;
+          wait $MAVROS_PID
+          <% elsif simulated_time %>
+          sudo sed -i '0,/ros__parameters:/s/ros__parameters:/ros__parameters:\n    use_sim_time: true/' /opt/ros/humble/share/mavros/launch/apm_config.yaml &&
           ros2 launch mavros apm.launch fcu_url:=udp://<%= "#{sim_subnet}.90.#{drone_id}" %>:8888@8888 tgt_system:=<%= drone_id %>
           <% else %>
           python3 /aas/aircraft_resources/patches/request_mavlink_streams.py --device '/dev/ttyTHS1' --baudrate 921600 --target-system <%= drone_id %> --target-component 1 --rate 4 &&

@@ -62,7 +62,7 @@ windows:
       signed_32bit_ip = "#{sim_subnet}.90.#{drone_id}".split('.').map(&:to_i).pack('C*').unpack1('l>')
     elsif autopilot == 'ardupilot'
       vehicle_config = is_quad ? '-v ArduCopter -f airsim-copter' : '-v ArduPlane -f airsim-quadplane'
-      model_name = is_quad ? "iris_with_ardupilot_#{drone_id}" : "alti_transition_quad_#{drone_id}"
+      model_name = is_quad ? "iris_with_ardupilot" : "alti_transition_quad"
       # AirSim<->ArduPilot UDP ports are per-instance to avoid collisions.
       sim_port_in = 9003 + sitl_instance * 10
       sim_port_out = 9002 + sitl_instance * 10
@@ -91,7 +91,8 @@ windows:
           /aas/github_apps/ardupilot/Tools/autotest/sim_vehicle.py
           <%= vehicle_config %>
           -I <%= sitl_instance %> --sysid <%= drone_id %>
-          -A "--sim-address=<%= airsim_host %> --sim-port-in=<%= sim_port_in %> --sim-port-out=<%= sim_port_out %>"
+          --sim-address=<%= airsim_host %>
+          -A "--sim-port-in=<%= sim_port_in %> --sim-port-out=<%= sim_port_out %>"
           --add-param-file=/aas/simulation_resources/aircraft_models/<%= model_name %>/ardupilot-4.6.params
           <% if gnd_container %>
           --out=udp:<%= "#{sim_subnet}.90.#{drone_id}" %>:8888

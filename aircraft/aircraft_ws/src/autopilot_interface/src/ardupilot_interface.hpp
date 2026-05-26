@@ -169,6 +169,9 @@ private:
 
     // Subscribers variables
     int target_system_id_, mav_state_, mav_type_;
+    bool airsim_mode_; // SIM=airsim: this AirSim SITL reports MAV_STATE CRITICAL(5) persistently even when armable
+    // Vehicle "ready" gate: STANDBY(3) normally; also accept CRITICAL(5) under AirSim (its system_status is unreliable)
+    inline bool mav_ready() const { return (mav_state_ == 3) || (airsim_mode_ && mav_state_ == 5); }
     bool armed_flag_;
     std::string ardupilot_mode_;
     double lat_, lon_, alt_, alt_ellipsoid_;
