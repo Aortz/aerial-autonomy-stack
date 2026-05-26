@@ -763,13 +763,13 @@ void ArdupilotInterface::orbit_handle_accepted(const std::shared_ptr<rclcpp_acti
                 mission_request->waypoints.push_back(wp1);
                 auto [center_lat, center_lon] = lat_lon_from_cartesian(home_lat_, home_lon_, desired_east, desired_north);
                 mavros_msgs::msg::Waypoint wp_roi; // Waypoint to lock nose to center
-                wp_roi.frame = 3;
-                wp_roi.command = 195; // MAV_CMD_DO_SET_ROI_LOCATION
+                wp_roi.frame = 0; // MAV_FRAME_GLOBAL
+                wp_roi.command = 201; // MAV_CMD_DO_SET_ROI (ArduCopter rejects DO_SET_ROI_LOCATION/195 in a mission upload; 201 is accepted)
                 wp_roi.is_current = false;
                 wp_roi.autocontinue = true;
-                wp_roi.x_lat = center_lat; // Param 5
-                wp_roi.y_long = center_lon; // Param 6
-                wp_roi.z_alt = 0.0;
+                wp_roi.x_lat = center_lat; // Param 5 (lat)
+                wp_roi.y_long = center_lon; // Param 6 (lon)
+                wp_roi.z_alt = desired_alt; // Param 7 (alt) — ROI at orbit center, orbit altitude
                 mission_request->waypoints.push_back(wp_roi);
                 int num_points = std::max(ORBIT_MIN_POINTS, static_cast<int>((2 * M_PI * desired_r) / ORBIT_POINT_SPACING));
                 double angle_increment = 360.0 / num_points;
