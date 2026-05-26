@@ -24,6 +24,12 @@ GND_CONTAINER="${GND_CONTAINER:-true}" # Options: true (default), false
 RTF="${RTF:-1.0}" # Real-time factor (default = 1.0), set to <=0.0 for as fast as possible execution
 START_AS_PAUSED="${START_AS_PAUSED:-false}" # Options: true, false (default)
 INSTANCE="${INSTANCE:-0}" # Integer ID to make docker network/container names unique as well as offsetting the second byte of the subnets (default = 0)
+#
+SIM="${SIM:-gazebo}" # Simulator backend: gazebo (default), airsim
+AIRSIM_HOST="${AIRSIM_HOST:-host.docker.internal}" # IP/host of the (external) AirSim RPC+HIL server, for SIM=airsim
+BRIDGE_IMAGE="${BRIDGE_IMAGE:-tevv-airsim-ros2-bridge:humble}" # TEVV-Airsim-ROS2-Bridge image, for SIM=airsim
+AIRSIM_EXTERNAL="${AIRSIM_EXTERNAL:-false}" # SIM=airsim: connect AAS aircraft to an EXTERNAL host-net AirSim+SITL (e.g. the ardupilot-xfs compose); launches ONLY the aircraft container(s) on --net=host (no AAS sim/ground/bridge/networks)
+FCU_URL="${FCU_URL:-tcp://127.0.0.1:5760}" # MAVROS fcu_url for AIRSIM_EXTERNAL (ardupilot-slim serves MAVLink on TCP 5760; default port auto-offsets +10 per drone unless overridden)
 # Set unique subnets and container/network names based on INSTANCE
 SIM_BYTE_1=$(echo "$SIM_SUBNET" | cut -d'.' -f1)
 SIM_BYTE_2=$(echo "$SIM_SUBNET" | cut -d'.' -f2)
@@ -113,6 +119,63 @@ XTERM_CONFIG_ARGS=(
     Ctrl Shift <Key>V: insert-selection(CLIPBOARD)'
 )
 
+# ---------------------------------------------------------------------------
+# AirSim EXTERNAL mode: the AirSim sim + ArduPilot SITL + sensor bridges run
+# OUTSIDE AAS (e.g. the host-networked ardupilot-xfs compose). Launch ONLY the
+# AAS aircraft container(s) on --net=host so MAVROS reaches the SITL's MAVLink on
+# localhost. No AAS sim/ground/bridge containers, no docker networks.
+# ---------------------------------------------------------------------------
+if [[ "$SIM" == "airsim" && "$AIRSIM_EXTERNAL" == "true" ]]; then
+  echo "AirSim EXTERNAL mode: launching only AAS aircraft container(s) on --net=host (sim provided by your compose)."
+  ext_cleanup() {
+    echo "Stopping AAS aircraft container(s)..."
+    for CID in $(docker ps -a -q --filter name="aircraft-container-inst${INSTANCE}" 2>/dev/null); do
+      docker stop -t 1 "$CID" >/dev/null 2>&1 || true
+      docker rm "$CID" >/dev/null 2>&1 || true
+    done
+    if command -v xhost >/dev/null 2>&1; then xhost -local:docker >/dev/null 2>&1 || true; fi
+    echo "All-clear"
+  }
+  trap ext_cleanup EXIT INT TERM
+  EXT_DRONE_ID=1
+  launch_ext_aircraft() {
+    local drone_type=$1
+    local num_drones=$2
+    for i in $(seq 1 "$num_drones"); do
+      sleep 1.0 # Limit resource usage
+      local NAME_AIRCRAFT_CNT="aircraft-container-inst${INSTANCE}_${EXT_DRONE_ID}"
+      # Per-drone MAVLink: ardupilot-slim serves TCP 5760 + 10*(id-1).
+      # Honor an explicit FCU_URL override (single-drone tuning); else auto-offset.
+      local fcu="$FCU_URL"
+      if [ "$FCU_URL" = "tcp://127.0.0.1:5760" ]; then fcu="tcp://127.0.0.1:$((5760 + (EXT_DRONE_ID - 1) * 10))"; fi
+      local DOCKER_CMD="docker run -it --rm \
+        --volume /tmp/.X11-unix:/tmp/.X11-unix:rw --device /dev/dri --gpus all \
+        --env DISPLAY=$DISPLAY --env QT_X11_NO_MITSHM=1 --env NVIDIA_DRIVER_CAPABILITIES=all --env XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR --env GST_DEBUG=3 \
+        --env __NV_PRIME_RENDER_OFFLOAD=1 --env __GLX_VENDOR_LIBRARY_NAME=nvidia \
+        --env AUTOPILOT=$AUTOPILOT --env HEADLESS=$HEADLESS --env CAMERA=$CAMERA --env LIDAR=$LIDAR \
+        --env DRONE_TYPE=$drone_type --env DRONE_ID=$EXT_DRONE_ID \
+        --env SIM=airsim --env SIMULATED_TIME=false --env FCU_URL=$fcu \
+        --env GND_CONTAINER=false \
+        --env ROS_DOMAIN_ID=$EXT_DRONE_ID \
+        --net=host \
+        --privileged \
+        --name $NAME_AIRCRAFT_CNT"
+      if [[ "$DESK_ENV" == "wsl" ]]; then DOCKER_CMD="$DOCKER_CMD $WSL_OPTS"; fi
+      DOCKER_CMD="$DOCKER_CMD ${DEV_AIR_OPTS} aircraft-image"
+      calculate_terminal_position "$EXT_DRONE_ID"
+      xterm "${XTERM_CONFIG_ARGS[@]}" -title "${drone_type^^} $EXT_DRONE_ID (AirSim ext, fcu=$fcu)" -fa Monospace -fs $FONT_SIZE -bg black -fg white \
+        -geometry "${TERM_COLS}x${TERM_ROWS}+${X_POS}+${Y_POS}" -hold -e bash -c "$DOCKER_CMD" &
+      EXT_DRONE_ID=$((EXT_DRONE_ID + 1))
+    done
+  }
+  launch_ext_aircraft "quad" "$NUM_QUADS"
+  launch_ext_aircraft "vtol" "$NUM_VTOLS"
+  echo "Aircraft container(s) up on --net=host -> MAVROS connects to the external SITL ($FCU_URL)."
+  echo "Press any key to stop the aircraft container(s)..."
+  read -n 1 -s
+  exit 0
+fi
+
 # Launch the simulation container
 DOCKER_CMD="docker run -it --rm \
   --volume /tmp/.X11-unix:/tmp/.X11-unix:rw --device /dev/dri --gpus all \
@@ -123,6 +186,7 @@ DOCKER_CMD="docker run -it --rm \
   --env SIMULATED_TIME=true --env RTF=$RTF --env START_AS_PAUSED=$START_AS_PAUSED \
   --env SIM_SUBNET=$SIM_SUBNET --env GROUND_ID=$GROUND_ID \
   --env GND_CONTAINER=$GND_CONTAINER \
+  --env SIM=$SIM \
   --env ROS_DOMAIN_ID=$SIM_ID \
   --env HOST_INPUT_GID=$(getent group input | cut -d: -f3) \
   --privileged \
@@ -132,6 +196,12 @@ if [[ "$HITL" == "true" ]]; then
   DOCKER_CMD="$DOCKER_CMD --net=host"
 else
   DOCKER_CMD="$DOCKER_CMD --net=$SIM_NET_NAME --ip=${SIM_SUBNET}.90.${SIM_ID}"
+fi
+# AirSim backend: SITL (inside this container) connects out to the external AirSim
+# host, so add a route to it (host.docker.internal does not resolve on a custom
+# docker bridge network without this) and pass the host through to the launcher.
+if [[ "$SIM" == "airsim" ]]; then
+  DOCKER_CMD="$DOCKER_CMD --add-host=host.docker.internal:host-gateway --env AIRSIM_HOST=$AIRSIM_HOST"
 fi
 # Add WSL-specific options and complete the command
 if [[ "$DESK_ENV" == "wsl" ]]; then
@@ -204,10 +274,36 @@ if [[ "$HITL" == "false" ]]; then
       DRONE_ID=$((DRONE_ID + 1))
     done
   }
+
+  # Launch one TEVV-Airsim-ROS2-Bridge container per drone (SIM=airsim only).
+  # The bridge is a pure RPC client (no GPU); it joins the SIM network and the
+  # drone's ROS_DOMAIN_ID so the sim container's camera shim / LiDAR relay and the
+  # aircraft container receive its sensor topics. AirSim must already be running.
+  launch_bridge_containers() {
+    local total=$((NUM_QUADS + NUM_VTOLS))
+    for i in $(seq 1 $total); do
+      sleep 1.0 # Limit resource usage
+      local NAME_BRIDGE_CNT="airsim-bridge-container-inst${INSTANCE}_${i}"
+      docker run -d --rm \
+        --env ROS_DOMAIN_ID=$i \
+        --net=$SIM_NET_NAME \
+        --add-host=host.docker.internal:host-gateway \
+        --name $NAME_BRIDGE_CNT \
+        $BRIDGE_IMAGE \
+        ros2 launch airsim_ros2_bridge single_vehicle.launch.py \
+          vehicle_name:=Drone$i host_ip:=$AIRSIM_HOST
+    done
+  }
+
   # Launch the Quad containers
   launch_aircraft_containers "quad" $NUM_QUADS
   # Launch the VTOL containers
   launch_aircraft_containers "vtol" $NUM_VTOLS
+
+  # Launch the AirSim->ROS2 bridge container(s) when using the AirSim backend
+  if [[ "$SIM" == "airsim" ]]; then
+    launch_bridge_containers
+  fi
 
   if [[ "$GND_CONTAINER" == "true" ]]; then
     sleep 2.0 # Once all containers are up, connect ground and aircraft containers to the air network
@@ -225,7 +321,7 @@ read -n 1 -s # Wait for user input
 # Cleanup function
 cleanup() {
   DOCKER_PIDS=$(pgrep -f "docker run.*inst${INSTANCE}" 2>/dev/null || true)
-  CONTAINER_NAMES=("${SIM_CONT_NAME}" "${GND_CONT_NAME}" "aircraft-container-inst${INSTANCE}")
+  CONTAINER_NAMES=("${SIM_CONT_NAME}" "${GND_CONT_NAME}" "aircraft-container-inst${INSTANCE}" "airsim-bridge-container-inst${INSTANCE}")
   echo "Stopping Docker containers (this will take a few seconds)..."
   for name in "${CONTAINER_NAMES[@]}"; do
       CIDS=$(docker ps -a -q --filter name="${name}" 2>/dev/null || true)

@@ -1,5 +1,7 @@
 #include "ardupilot_interface.hpp"
 
+#include <cstdlib> // std::getenv (AirSim mode detection)
+
 ArdupilotInterface::ArdupilotInterface() : Node("ardupilot_interface"),
     active_srv_or_act_flag_(false), aircraft_fsm_state_(ArdupilotInterfaceState::STARTED),
     offboard_flag_frequency(10), offboard_flag_count_(0), last_offboard_flag_count_(0),
@@ -17,6 +19,12 @@ ArdupilotInterface::ArdupilotInterface() : Node("ardupilot_interface"),
         RCLCPP_INFO(this->get_logger(), "Simulation time is enabled.");
     } else {
         RCLCPP_INFO(this->get_logger(), "Simulation time is disabled.");
+    }
+    // AirSim SITL reports MAV_STATE CRITICAL(5) persistently even when armable; accept it as "ready"
+    const char* sim_env = std::getenv("SIM");
+    airsim_mode_ = (sim_env != nullptr && std::string(sim_env) == "airsim");
+    if (airsim_mode_) {
+        RCLCPP_WARN(this->get_logger(), "AirSim mode: treating MAV_STATE CRITICAL(5) as ready (SITL system_status is unreliable).");
     }
     last_offboard_flag_rate_check_time_ = this->get_clock()->now(); // Monitor the rate of offboard flag
     // Initialize the arrays
@@ -179,7 +187,7 @@ void ArdupilotInterface::state_callback(const State::SharedPtr msg)
     armed_flag_ = msg->armed;
     mav_state_ = msg->system_status; // MAV_STATE: MAV_STATE_CALIBRATING = 2, MAV_STATE_STANDBY = 3, MAV_STATE_ACTIVE = 4 (0: unkown, 5,6: failsafe, 8: flight termination, 1,7: boot)
     ardupilot_mode_ = msg->mode; // See https://github.com/mavlink/mavros/blob/ros2/mavros_msgs/msg/State.msg
-    if ((aircraft_fsm_state_ == ArdupilotInterfaceState::LANDED) && (mav_state_ == 3)) {
+    if ((aircraft_fsm_state_ == ArdupilotInterfaceState::LANDED) && mav_ready()) {
         aircraft_fsm_state_ = ArdupilotInterfaceState::STARTED; // Reset ArduPilot interface state when in standby after landing
     }
 }
@@ -190,7 +198,7 @@ void ArdupilotInterface::ardupilot_interface_printout_callback()
     std::shared_lock<std::shared_mutex> lock(node_data_mutex_); // Use shared_lock for data reads
 
     // Once the vehicle is in standby, retrieve for SYSID_THISMAV and MAV_TYPE if they are not already set
-    if ((mav_state_ == 3) && ((target_system_id_ == -1) || (mav_type_ == -1))) {
+    if (mav_ready() && ((target_system_id_ == -1) || (mav_type_ == -1))) {
         auto request = std::make_shared<VehicleInfoGet::Request>();
         vehicle_info_client_->async_send_request(request,
             [this](rclcpp::Client<VehicleInfoGet>::SharedFuture future) {
@@ -755,13 +763,13 @@ void ArdupilotInterface::orbit_handle_accepted(const std::shared_ptr<rclcpp_acti
                 mission_request->waypoints.push_back(wp1);
                 auto [center_lat, center_lon] = lat_lon_from_cartesian(home_lat_, home_lon_, desired_east, desired_north);
                 mavros_msgs::msg::Waypoint wp_roi; // Waypoint to lock nose to center
-                wp_roi.frame = 3;
-                wp_roi.command = 195; // MAV_CMD_DO_SET_ROI_LOCATION
+                wp_roi.frame = 0; // MAV_FRAME_GLOBAL
+                wp_roi.command = 201; // MAV_CMD_DO_SET_ROI (ArduCopter rejects DO_SET_ROI_LOCATION/195 in a mission upload; 201 is accepted)
                 wp_roi.is_current = false;
                 wp_roi.autocontinue = true;
-                wp_roi.x_lat = center_lat; // Param 5
-                wp_roi.y_long = center_lon; // Param 6
-                wp_roi.z_alt = 0.0;
+                wp_roi.x_lat = center_lat; // Param 5 (lat)
+                wp_roi.y_long = center_lon; // Param 6 (lon)
+                wp_roi.z_alt = desired_alt; // Param 7 (alt) — ROI at orbit center, orbit altitude
                 mission_request->waypoints.push_back(wp_roi);
                 int num_points = std::max(ORBIT_MIN_POINTS, static_cast<int>((2 * M_PI * desired_r) / ORBIT_POINT_SPACING));
                 double angle_increment = 360.0 / num_points;
@@ -894,7 +902,7 @@ rclcpp_action::GoalResponse ArdupilotInterface::takeoff_handle_goal(const rclcpp
         RCLCPP_ERROR(this->get_logger(), "Takeoff rejected, ArdupilotInterface is not in STARTED state");
         return rclcpp_action::GoalResponse::REJECT;
     }
-    if (mav_state_ != 3) {
+    if (!mav_ready()) {
         RCLCPP_ERROR(this->get_logger(), "Takeoff rejected, mav_state_ is not standby");
         return rclcpp_action::GoalResponse::REJECT;
     }

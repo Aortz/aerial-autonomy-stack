@@ -21,12 +21,15 @@ from cv_bridge import CvBridge
 CONF_THRESH = 0.5
 
 class YoloInferenceNode(Node):
-    def __init__(self, headless, hitl, remote_video_streams, dfov):
+    def __init__(self, headless, hitl, remote_video_streams, dfov, ros_image_topic=None):
         super().__init__('yolo_inference_node')
         self.headless = headless
         self.hitl = hitl
         self.remote_video_streams = remote_video_streams
         self.dfov = dfov
+        # AirSim: when set, ingest frames from this ROS sensor_msgs/Image topic
+        # (the airsim-ros2-bridge camera) instead of the GStreamer udp:5600 stream.
+        self.ros_image_topic = ros_image_topic
         self.fx = None
         self.fy = None
         self.architecture = platform.machine()
@@ -54,6 +57,8 @@ class YoloInferenceNode(Node):
         self.get_logger().info("YOLO inference started.")
 
     def run_inference_loop(self):
+        if self.ros_image_topic:
+            return self._run_ros_image_inference()
         # Acquire video stream
         if self.architecture == 'x86_64':
             # # GPU pipeline: TODO NOT WORKING
@@ -266,6 +271,74 @@ class YoloInferenceNode(Node):
         if not self.headless:
             cv2.destroyAllWindows()
 
+    def _airsim_image_cb(self, msg):
+        # Convert the bridge's Image to a BGR cv2 frame and keep only the latest (low latency)
+        try:
+            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        except Exception as e:
+            self.get_logger().warn(f"cv_bridge conversion failed: {e}")
+            return
+        if self._frame_queue.full():
+            try:
+                self._frame_queue.get_nowait()
+            except queue.Empty:
+                pass
+        try:
+            self._frame_queue.put_nowait(frame)
+        except queue.Full:
+            pass
+
+    def _run_ros_image_inference(self):
+        # AirSim path: frames arrive on a ROS sensor_msgs/Image topic (the airsim-ros2-bridge
+        # camera), not GStreamer udp:5600. Reuses do_yolo/publish_detections/visualize.
+        # Assumes the x86_64 simulation host (AirSim runs on x86 + NVIDIA).
+        self.get_logger().info(f"AirSim camera mode: subscribing to {self.ros_image_topic}")
+        self._frame_queue = queue.Queue(maxsize=1)
+        self.create_subscription(Image, self.ros_image_topic, self._airsim_image_cb, 10)
+        # Spin in a background thread so the subscription (and /clock) fire
+        threading.Thread(target=self.ros_spin_thread, daemon=True).start()
+
+        # Block until the first frame to learn the stream resolution
+        self.get_logger().info("Waiting for the first camera frame from the bridge...")
+        frame = self._frame_queue.get()
+        stream_height, stream_width = frame.shape[:2]
+        print(f"Stream Resolution: {stream_width}x{stream_height}")
+
+        # Intrinsics from the diagonal FOV (same pinhole model as the GStreamer path)
+        diag_pixels = math.sqrt(stream_width**2 + stream_height**2)
+        self.fx = diag_pixels / (2 * math.tan(math.radians(self.dfov) / 2))
+        self.fy = self.fx
+        hfov = math.degrees(2 * math.atan(stream_width / (2 * self.fx)))
+        vfov = math.degrees(2 * math.atan(stream_height / (2 * self.fy)))
+        print(f"DFOV {self.dfov}deg, HFOV {hfov:.2f}deg, VFOV {vfov:.2f}deg")
+
+        # Load the YOLO model (x86_64 / CUDA, sized to the stream)
+        max_dim = max(stream_width, stream_height)
+        if max_dim <= 320:
+            model_path, self.input_size = "/aas/yolo/yolo26n_320.onnx", 320
+        else:
+            model_path, self.input_size = "/aas/yolo/yolo26n_640.onnx", 640
+        self.session = ort.InferenceSession(model_path, providers=["CUDAExecutionProvider"])
+        self.input_name = self.session.get_inputs()[0].name
+        self.get_logger().info(f"Execution providers in use: {self.session.get_providers()}")
+        if not self.headless:
+            self.WINDOW_NAME = f"YOLO (Aircraft {os.getenv('DRONE_ID', '1')})"
+            cv2.namedWindow(self.WINDOW_NAME, cv2.WINDOW_NORMAL)
+
+        while rclpy.ok():
+            try:
+                frame = self._frame_queue.get(timeout=1.0)
+            except queue.Empty:
+                self.get_logger().info("No camera frames; is the bridge publishing the image topic?")
+                continue
+            boxes, confidences, class_ids = self.do_yolo(frame)
+            if len(boxes) > 0:
+                self.publish_detections(frame.shape, boxes, confidences, class_ids)
+            if not self.headless:
+                self.visualize(frame, boxes, confidences, class_ids)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+
     def ros_spin_thread(self):
         while rclpy.ok():
             rclpy.spin_once(self, timeout_sec=0.001) # This is only to get the simulation time from /clock
@@ -428,11 +501,12 @@ def main(args=None):
     parser.add_argument('--hitl', action='store_true', help="Open camerafrom gz-sim for HITL.")
     parser.add_argument('--remote-video-streams', action='store_true', help="Send video streams to the ground container.")
     parser.add_argument('--dfov', type=float, default=100.0, help="Diagonal field of view in degrees.")
+    parser.add_argument('--ros-image-topic', type=str, default='', help="AirSim: ingest frames from this ROS sensor_msgs/Image topic instead of GStreamer udp:5600.")
     cli_args, ros_args = parser.parse_known_args()
 
     rclpy.init(args=ros_args)
 
-    yolo_node = YoloInferenceNode(headless=cli_args.headless, hitl=cli_args.hitl, remote_video_streams=cli_args.remote_video_streams, dfov=cli_args.dfov)
+    yolo_node = YoloInferenceNode(headless=cli_args.headless, hitl=cli_args.hitl, remote_video_streams=cli_args.remote_video_streams, dfov=cli_args.dfov, ros_image_topic=(cli_args.ros_image_topic or None))
     yolo_node.run_inference_loop()
     
     yolo_node.destroy_node()

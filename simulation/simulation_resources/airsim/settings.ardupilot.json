@@ -1,0 +1,47 @@
+{
+  "SeeDocsAt": "https://ardupilot.org/dev/docs/sitl-with-airsim.html",
+  "SettingsVersion": 1.2,
+  "SimMode": "Multirotor",
+  "ClockType": "ScalableClock",
+  "ApiServerPort": 41451,
+  "LocalHostIp": "0.0.0.0",
+  "Vehicles": {
+    "Drone1": {
+      "VehicleType": "ArduCopter",
+      "UseSerial": false,
+      "LocalHostIp": "127.0.0.1",
+      "UdpIp": "127.0.0.1",
+      "UdpPort": 9003,
+      "ControlPort": 9002,
+      "Cameras": {
+        "front_center": {
+          "CaptureSettings": [
+            { "ImageType": 0, "Width": 320, "Height": 240, "FOV_Degrees": 90 }
+          ],
+          "X": 0.155, "Y": 0.0, "Z": -0.05,
+          "Pitch": -25.0, "Roll": 0.0, "Yaw": 0.0
+        }
+      },
+      "Sensors": {
+        "imu": { "SensorType": 2, "Enabled": true },
+        "gps": { "SensorType": 3, "Enabled": true },
+        "magnetometer": { "SensorType": 4, "Enabled": true },
+        "barometer": { "SensorType": 1, "Enabled": true },
+        "lidar": {
+          "SensorType": 6,
+          "Enabled": true,
+          "NumberOfChannels": 40,
+          "RotationsPerSecond": 4,
+          "PointsPerSecond": 38400,
+          "Range": 70,
+          "VerticalFOVUpper": 7,
+          "VerticalFOVLower": -52,
+          "HorizontalFOVStart": -180,
+          "HorizontalFOVEnd": 180,
+          "DrawDebugPoints": false,
+          "DataFrame": "SensorLocalFrame"
+        }
+      }
+    }
+  }
+}
