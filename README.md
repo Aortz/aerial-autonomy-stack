@@ -182,16 +182,66 @@ done
 > </details>
 
 > [!NOTE]
-> **Run with AirSim instead of Gazebo (experimental).** AAS can use [Cosys-AirSim](https://github.com/DinoHub/TEVV-Airsim) as the simulator backend: AirSim drives PX4/ArduPilot SITL while the [`TEVV-Airsim-ROS2-Bridge`](https://github.com/DinoHub/TEVV-Airsim-ROS2-Bridge) surfaces AirSim's camera/LiDAR into ROS2. The aircraft autonomy stack is unchanged; real-time only (no Gymnasium stepping).
+> **How container terminals are exposed (Xterm + Tmux).** `sim_run.sh` opens one **Xterm**
+> window per container on the host (titled `Simulation`, `Ground`, `QUAD N`, ...). Each window
+> is only a wrapper: *inside* the container the entrypoint runs **tmuxinator** (`*.yml.erb`),
+> which puts every ROS2 node in its own tmux pane. So tmux is the in-container convention; Xterm
+> just shows that session on your desktop.
 >
-> Prereqs: an NVIDIA GPU; AirSim running with one of the provided settings ([`simulation/simulation_resources/airsim/settings.px4.json`](simulation/simulation_resources/airsim/settings.px4.json) or [`settings.ardupilot.json`](simulation/simulation_resources/airsim/settings.ardupilot.json)); the bridge image built (`tevv-airsim-ros2-bridge:humble`). Then:
+> You don't need Xterm to reach a running container — attach to its tmux session from any shell:
 >
 > ```sh
-> cd aerial-autonomy-stack/tools_and_docs/
-> SIM=airsim AUTOPILOT=px4 NUM_QUADS=1 ./sim_run.sh                                           # set AIRSIM_HOST=<ip> if AirSim is not reachable at host.docker.internal
+> docker exec -it simulation-container-inst0 tmux attach
+> docker exec -it aircraft-container-inst0_1 tmux attach        # _<N> per drone
 > ```
 >
-> Full runbook (SITL↔AirSim, networking, caveats) and a `verify.sh` smoke-test: [`simulation/simulation_resources/airsim/README.md`](simulation/simulation_resources/airsim/README.md).
+> Detach with `Ctrl + b`, then `d`. Xterm needs an X server (`DISPLAY`), so on a **headless/SSH**
+> host the Xterm windows won't open — use the `docker exec ... tmux attach` route instead. (The
+> simulator GUI — Gazebo or the AirSim viewer — still needs X regardless; tmux only carries text.)
+
+> [!NOTE]
+> **Run on AirSim (ArduPilot) — quickstart.** AAS flies on [Cosys-AirSim](https://github.com/DinoHub/TEVV-Airsim)
+> by connecting its (unchanged) aircraft autonomy to an externally-run, **host-networked**
+> AirSim + ArduPilot-SITL sim (e.g. an `ardupilot-xfs` compose), with the
+> [`TEVV-Airsim-ROS2-Bridge`](https://github.com/DinoHub/TEVV-Airsim-ROS2-Bridge) surfacing
+> AirSim's camera/LiDAR into ROS2. Real-time only (no Gymnasium stepping). Autonomous
+> takeoff → orbit → land is verified end-to-end.
+>
+> **Prereqs:** an NVIDIA GPU; the AirSim + ArduPilot-SITL sim running (vehicle `Copter1`,
+> MAVLink on TCP `5760`); the AAS `aircraft-image` built (`./sim_build.sh`).
+>
+> **1. Start the sim** (your compose — AirSim window + QGC), one drone, and wait until QGC shows `Copter1` ready:
+> ```sh
+> NUM_DRONES=1 ./launch.sh ardupilot-xfs                 # your sim launcher (adjust to yours)
+> ```
+>
+> **2. Launch the AAS aircraft** against it — *External* mode runs **only** the aircraft container on `--net=host`:
+> ```sh
+> cd aerial-autonomy-stack/tools_and_docs/
+> SIM=airsim AIRSIM_EXTERNAL=true AUTOPILOT=ardupilot \
+>   NUM_QUADS=1 NUM_VTOLS=0 CAMERA=false LIDAR=true ./sim_run.sh
+> ```
+>
+> **3. Send the machine** (run the mission — autonomous):
+> ```sh
+> docker exec -d aircraft-container-inst0_1 bash -c \
+>   "source /opt/ros/humble/setup.bash && source /aas/aircraft_ws/install/setup.bash && \
+>    ros2 run mission mission --conops yalla.yaml --ros-args -r __ns:=/Drone1 -p use_sim_time:=false"
+> ```
+> → the drone arms, takes off, orbits (AUTO), and lands — autonomously, in the AirSim window.
+>
+> **Knobs:** `FCU_URL` (MAVLink endpoint, default `tcp://127.0.0.1:5760`, `+10` per drone) ·
+> `AUTOPILOT=ardupilot|px4` · `CAMERA`/`LIDAR` · `NUM_QUADS`/`NUM_VTOLS`.
+>
+> **Perception:** LiDAR auto-wires (`kiss_icp` ← the bridge's `/Copter<id>/LidarSensor1/points`).
+> Camera needs a camera added to your AirSim settings ([`settings.ardupilot.json`](simulation/simulation_resources/airsim/settings.ardupilot.json)/[`settings.px4.json`](simulation/simulation_resources/airsim/settings.px4.json) show the shape) — none by default — then `yolo_node` consumes it.
+>
+> **Modes:** *External* (above, proven) reuses your sim and runs only the aircraft.
+> *Internal* (`SIM=airsim`, no `AIRSIM_EXTERNAL`) has AAS host SITL + bridges itself
+> (experimental; set `AIRSIM_HOST=<ip>` if AirSim isn't at `host.docker.internal`; PX4 HIL
+> still pending). Full architecture, every failure mode + fix, and the runbook:
+> [`tools_and_docs/docs/AIRSIM_INTEGRATION.md`](tools_and_docs/docs/AIRSIM_INTEGRATION.md)
+> and the [airsim runbook](simulation/simulation_resources/airsim/README.md) (incl. `verify.sh`).
 
 ## 3. Jetson Deployment
 
